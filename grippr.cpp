@@ -6,10 +6,15 @@
 
 #include <SDL.h>
 #include <SDL_opengl.h>
-#include <gl\glu.h>
+#include <gl/glu.h>
+#include <glm/mat4x4.hpp>
+#include <glm/vec3.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 
 using namespace std;
+using mat4 = glm::mat4;
+using vec3 = glm::vec3;
 
 
 static const int SCREEN_WIDTH = 800;
@@ -60,6 +65,28 @@ enum Bones
     NumBones,
 };
 float gRotations[NumBones] = { 0.f, -22.f, -65.f, -80.f };
+float gTranslations[NumBones] = { SHOULDER_HEIGHT, ARM_LENGTH, ARM_LENGTH, HAND_LENGTH };
+
+
+vec3 calcHandPoint()
+{
+    mat4 transform(1.f);
+
+    transform = glm::translate(transform, vec3(0.f, BASE_HEIGHT, 0.f));
+
+    vec3 haxis(-1.f, 0.f, 0.f);
+    vec3 vaxis(0.f, -1.f, 0.f);
+    for (int i = 0; i < NumBones; ++i)
+    {
+        const vec3& axis = (i != 0) ? haxis : vaxis;
+        transform = glm::rotate(transform, gRotations[i] * DEGTORAD, axis);
+        transform = glm::translate(transform, vec3(0.f, gTranslations[i], 0.f));
+    }
+
+    return transform[3];
+}
+
+
 
 
 void renderFloor(float size)
@@ -222,13 +249,21 @@ void render()
         }
     }
 
+    {
+        PushMatrixScope effectorScope;
+        vec3 effectorPos = calcHandPoint();
+        glTranslatef(effectorPos.x, effectorPos.y, effectorPos.z);
+        glColor3f(0.6f, 1.0f, 0.6f);
+        gluSphere(gQuadric, 15.f, 16, 16);
+    }
+
     glPopMatrix();
 }
 
 
 void update(float deltaTime)
 {
-    gRotations[SHOULDER] = -15.0f + 20.f * (float)sin(gWallTime);
+    gRotations[SHOULDER] = -15.0f + 20.f * (float)sin(gWallTime*2.f);
     gRotations[ELBOW] = -55.0f + 15.f * (float)cos(gWallTime);
 }
 
