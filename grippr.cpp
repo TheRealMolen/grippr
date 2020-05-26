@@ -1,8 +1,9 @@
 ﻿// based from: https://lazyfoo.net/tutorials/SDL/51_SDL_and_modern_opengl/index.php
 
-#include <string>
-#include <iostream>
 #include <chrono>
+#include <iostream>
+#include <string>
+#include <vector>
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -68,24 +69,29 @@ float gRotations[NumBones] = { 0.f, -22.f, -65.f, -80.f };
 float gTranslations[NumBones] = { SHOULDER_HEIGHT, ARM_LENGTH, ARM_LENGTH, HAND_LENGTH };
 
 
-vec3 calcHandPoint()
+
+struct TargetPoint
 {
-    mat4 transform(1.f);
+    vec3 pos;
+    bool found;
+    float rots[NumBones];
+};
 
-    transform = glm::translate(transform, vec3(0.f, BASE_HEIGHT, 0.f));
 
-    vec3 haxis(-1.f, 0.f, 0.f);
-    vec3 vaxis(0.f, -1.f, 0.f);
-    for (int i = 0; i < NumBones; ++i)
-    {
-        const vec3& axis = (i != 0) ? haxis : vaxis;
-        transform = glm::rotate(transform, gRotations[i] * DEGTORAD, axis);
-        transform = glm::translate(transform, vec3(0.f, gTranslations[i], 0.f));
-    }
+vector<TargetPoint> gTargets;
+static const float TARGET_MIN_X = -75.f;
+static const float TARGET_MAX_X =  75.f;
+static const float TARGET_STEP_X = 10.f;
+static const float TARGET_Y = 100.f;
+static const float TARGET_MIN_Z = 200.f;
+static const float TARGET_MAX_Z = 300.f;
+static const float TARGET_STEP_Z = 20.f;
+float gNextTargetX = TARGET_MIN_X;
+float gNextTargetZ = TARGET_MIN_Z;
+bool gFoundAllTargets = false;
 
-    return transform[3];
-}
 
+vec3 calcHandPoint(const float* rotations);
 
 
 
@@ -209,8 +215,10 @@ void render()
 
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
-    gluLookAt(600.f, 500.f, 500.f,
-        200.f, 350.f, 200.f,
+    gluLookAt(400.f, 500.f, 500.f,
+        //200.f, 350.f, 200.f,
+        //gIkTarget.x, gIkTarget.y, gIkTarget.z,
+        (TARGET_MIN_X + TARGET_MAX_X) * 0.5f, TARGET_Y, (TARGET_MIN_Z + TARGET_MAX_Z) * 0.5f,
         0.f, 1.f, 0.f);
 
     //renderAxis();
@@ -251,20 +259,136 @@ void render()
 
     {
         PushMatrixScope effectorScope;
-        vec3 effectorPos = calcHandPoint();
+        vec3 effectorPos = calcHandPoint(gRotations);
         glTranslatef(effectorPos.x, effectorPos.y, effectorPos.z);
-        glColor3f(0.6f, 1.0f, 0.6f);
+
+        if (gTargets.empty() || !gTargets.back().found)
+            glColor3f(1.f, 0.6f, 0.6f);
+        else
+            glColor3f(0.6f, 1.0f, 0.6f);
+
         gluSphere(gQuadric, 15.f, 16, 16);
+    }
+
+    for (auto& target : gTargets)
+    {
+        PushMatrixScope targetScope;
+        glTranslatef(target.pos.x, target.pos.y, target.pos.z);
+        glColor3f(0.6f, 0.6f, 1.f);
+        gluSphere(gQuadric, 5.f, 16, 16);
     }
 
     glPopMatrix();
 }
 
 
+// ---------------------------------------------------------------------------------------------------------------------------
+
+// TODO: upgrade VS and use span<>...
+vec3 calcHandPoint(const float* rotations)
+{
+    if (!rotations)
+        rotations = gRotations;
+
+    mat4 transform(1.f);
+
+    transform = glm::translate(transform, vec3(0.f, BASE_HEIGHT, 0.f));
+
+    vec3 haxis(-1.f, 0.f, 0.f);
+    vec3 vaxis(0.f, -1.f, 0.f);
+    for (int i = 0; i < NumBones; ++i)
+    {
+        const vec3& axis = (i != 0) ? haxis : vaxis;
+        transform = glm::rotate(transform, rotations[i] * DEGTORAD, axis);
+        transform = glm::translate(transform, vec3(0.f, gTranslations[i], 0.f));
+    }
+
+    return transform[3];
+}
+
+
+// IK solver based on https://www.alanzucconi.com/2017/04/10/robotic-arms/
+void tickIK(TargetPoint& target)
+{
+    static const float deltaAngle = 0.5f;
+    static const float learningRate = 0.1f;
+    static const float tolerance = 2.f;
+
+    float rotations[NumBones];
+    copy(gRotations, gRotations + NumBones, rotations);
+
+    vec3 currentPos = calcHandPoint(rotations);
+    float currentDistance = glm::distance(currentPos, target.pos);
+    if (currentDistance <= tolerance)
+    {
+        target.found = true;
+        cout << "   found @ ";
+        for (int i = 0; i < NumBones; ++i)
+        {
+            if (i != 0)
+                cout << ", ";
+            cout << target.rots[i];
+        }
+        cout << endl;
+
+        return;
+    }
+
+    // calculate all our gradients
+    float gradients[NumBones];
+    for (int i = 0; i < NumBones; ++i)
+    {
+        float oldAngle = rotations[i];
+        rotations[i] += deltaAngle;
+
+        vec3 testPos = calcHandPoint(rotations);
+        float newDistance = glm::distance(testPos, target.pos);
+        float gradient = (newDistance - currentDistance) / deltaAngle;
+
+        gradients[i] = gradient;
+
+        rotations[i] = oldAngle;
+    }
+
+    // update all our angles
+    for (int i = 0; i < NumBones; ++i)
+    {
+        gRotations[i] -= learningRate * gradients[i];
+        //gRotations[i] = roundf(gRotations[i]);
+    }
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------------
+
+
 void update(float deltaTime)
 {
-    gRotations[SHOULDER] = -15.0f + 20.f * (float)sin(gWallTime*2.f);
-    gRotations[ELBOW] = -55.0f + 15.f * (float)cos(gWallTime);
+    if (!gFoundAllTargets || !gTargets.back().found)
+    {
+        if (gTargets.empty() || gTargets.back().found)
+        {
+            TargetPoint& target = gTargets.emplace_back();
+            target.found = false;
+            copy(gRotations, gRotations + NumBones, target.rots);
+            target.pos = vec3(gNextTargetX, TARGET_Y, gNextTargetZ);
+            cout << "Starting " << target.pos.x << ", " << target.pos.y << ", " << target.pos.z << endl;
+
+            gNextTargetX += TARGET_STEP_X;
+            if (gNextTargetX > TARGET_MAX_X)
+            {
+                gNextTargetX = TARGET_MIN_X;
+                gNextTargetZ += TARGET_STEP_Z;
+                if (gNextTargetZ > TARGET_MAX_Z)
+                    gFoundAllTargets = true;
+            }
+        }
+
+        tickIK(gTargets.back());
+    }
+
+    //gRotations[SHOULDER] = -15.0f + 20.f * (float)sin(gWallTime*2.f);
+    //gRotations[ELBOW] = -55.0f + 15.f * (float)cos(gWallTime);
 }
 
 
