@@ -79,11 +79,11 @@ struct TargetPoint
 
 
 vector<TargetPoint> gTargets;
-static const float TARGET_MIN_X = -75.f;
-static const float TARGET_MAX_X =  75.f;
+static const float TARGET_MIN_X = -120.f;
+static const float TARGET_MAX_X =  120.f;
 static const float TARGET_STEP_X = 10.f;
 static const float TARGET_Y = 100.f;
-static const float TARGET_MIN_Z = 200.f;
+static const float TARGET_MIN_Z = 140.f;
 static const float TARGET_MAX_Z = 300.f;
 static const float TARGET_STEP_Z = 20.f;
 float gNextTargetX = TARGET_MIN_X;
@@ -231,7 +231,7 @@ void render()
     {
         PushMatrixScope baseScope;
         glTranslatef(0.f, BASE_HEIGHT, 0.f);
-        glRotatef(gRotations[BASE_ROT], -1.f, 0.f, 0.f);
+        glRotatef(gRotations[BASE_ROT], 0.f, -1.f, 0.f);
 
         renderBase(SHOULDER_HEIGHT);
         {
@@ -310,18 +310,16 @@ vec3 calcHandPoint(const float* rotations)
 // IK solver based on https://www.alanzucconi.com/2017/04/10/robotic-arms/
 void tickIK(TargetPoint& target)
 {
-    static const float deltaAngle = 0.5f;
-    static const float learningRate = 0.1f;
-    static const float tolerance = 2.f;
+    float deltaAngle = 0.25f;
+    float learningRate = 0.1f;
+    static const float tolerance = 1.f;
 
-    float rotations[NumBones];
-    copy(gRotations, gRotations + NumBones, rotations);
-
-    vec3 currentPos = calcHandPoint(rotations);
+    vec3 currentPos = calcHandPoint(target.rots);
     float currentDistance = glm::distance(currentPos, target.pos);
     if (currentDistance <= tolerance)
     {
         target.found = true;
+        target.pos = currentPos;
         cout << "   found @ ";
         for (int i = 0; i < NumBones; ++i)
         {
@@ -334,28 +332,37 @@ void tickIK(TargetPoint& target)
         return;
     }
 
+    // move more carefully when we get close
+    if (currentDistance < tolerance * 3.f)
+    {
+        learningRate *= 0.25f;
+        deltaAngle *= 0.5f;
+    }
+
     // calculate all our gradients
     float gradients[NumBones];
     for (int i = 0; i < NumBones; ++i)
     {
-        float oldAngle = rotations[i];
-        rotations[i] += deltaAngle;
+        float oldAngle = target.rots[i];
+        target.rots[i] += deltaAngle;
 
-        vec3 testPos = calcHandPoint(rotations);
+        vec3 testPos = calcHandPoint(target.rots);
         float newDistance = glm::distance(testPos, target.pos);
         float gradient = (newDistance - currentDistance) / deltaAngle;
 
         gradients[i] = gradient;
 
-        rotations[i] = oldAngle;
+        target.rots[i] = oldAngle;
     }
 
     // update all our angles
     for (int i = 0; i < NumBones; ++i)
     {
-        gRotations[i] -= learningRate * gradients[i];
-        //gRotations[i] = roundf(gRotations[i]);
+        target.rots[i] -= learningRate * gradients[i];
+        //target.rots[i] = roundf(target.rots[i]);
     }
+
+    copy(target.rots, target.rots + NumBones, gRotations);
 }
 
 
@@ -436,8 +443,24 @@ bool init()
         return false;
     }
 
+    int screenWidth = SCREEN_WIDTH;
+    int screenHeight = SCREEN_HEIGHT;
+
+    float defaultDpi = 96.f;
+    float dpi = defaultDpi;
+    if (SDL_GetDisplayDPI(0, nullptr, &dpi, nullptr))
+    {
+        cerr << "Failed to read screen dpi: " << SDL_GetError() << endl;
+    }
+    float dpiRatio = dpi / defaultDpi;
+    screenWidth = (int)(dpiRatio * screenWidth);
+    screenHeight = (int)(dpiRatio * screenHeight);
+
     //Create window
-    gWindow = SDL_CreateWindow("grippr", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+    gWindow = SDL_CreateWindow("grippr",
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        screenWidth, screenHeight,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!gWindow)
     {
         cerr << "Window could not be created! SDL Error: " << SDL_GetError() << endl;
@@ -454,6 +477,11 @@ bool init()
     {
         cerr << "OpenGL context could not be created! SDL Error: " << SDL_GetError() << endl;
         return false;
+    }
+
+    if (false && SDL_GL_SetSwapInterval(1))
+    {
+        cerr << "Failed to get vsync: " << SDL_GetError() << endl;
     }
 
     return initGL();
