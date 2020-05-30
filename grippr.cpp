@@ -1,6 +1,7 @@
 ﻿// based from: https://lazyfoo.net/tutorials/SDL/51_SDL_and_modern_opengl/index.php
 
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -17,6 +18,12 @@ using namespace std;
 using mat4 = glm::mat4;
 using vec3 = glm::vec3;
 
+inline float distance_sq(const vec3& a, const vec3& b)
+{
+    vec3 diff = b - a;
+    return glm::dot(diff, diff);
+}
+
 
 static const int SCREEN_WIDTH = 800;
 static const int SCREEN_HEIGHT = 600;
@@ -27,6 +34,7 @@ static const float SHOULDER_HEIGHT = 72.f;
 static const float ARM_OVERLAP = 25.f;
 static const float ARM_LENGTH = 124.f;
 static const float HAND_LENGTH = 192.f;
+static const float PEN_LENGTH = 90.f;
 
 static const float PI = 3.141592f;
 static const float PIBY180 = PI / 180.0f;
@@ -66,13 +74,14 @@ enum Bones
     NumBones,
 };
 float gRotations[NumBones] = { 0.f, -22.f, -65.f, -80.f };
-float gTranslations[NumBones] = { SHOULDER_HEIGHT, ARM_LENGTH, ARM_LENGTH, HAND_LENGTH };
+float gTranslations[NumBones] = { SHOULDER_HEIGHT, ARM_LENGTH, ARM_LENGTH, HAND_LENGTH + PEN_LENGTH };
 
 
 
 struct TargetPoint
 {
     vec3 pos;
+    vec3 initialPos;
     bool found;
     float rots[NumBones];
 };
@@ -82,13 +91,14 @@ vector<TargetPoint> gTargets;
 static const float TARGET_MIN_X = -120.f;
 static const float TARGET_MAX_X =  120.f;
 static const float TARGET_STEP_X = 10.f;
-static const float TARGET_Y = 100.f;
-static const float TARGET_MIN_Z = 140.f;
+static const float TARGET_Y = 5.f;
+static const float TARGET_MIN_Z = 160.f;
 static const float TARGET_MAX_Z = 300.f;
-static const float TARGET_STEP_Z = 20.f;
+static const float TARGET_STEP_Z = 10.f;
 float gNextTargetX = TARGET_MIN_X;
 float gNextTargetZ = TARGET_MIN_Z;
 bool gFoundAllTargets = false;
+bool gWrittenResults = false;
 
 
 vec3 calcHandPoint(const float* rotations);
@@ -187,6 +197,13 @@ void renderHand()
         glTranslatef(20.f, 0.f, 0.f);
         renderBox(25.f, HAND_LENGTH - 60.f, 12.f);
     }
+    {
+        PushMatrixScope pen;
+        glColor3f(0.1f, 0.1f, 0.3f);
+        glTranslatef(25.f, 60.f, 0.f);
+        glRotatef(6.f, 0.f, 0.f, 1.f);
+        renderBox(4.5f, PEN_LENGTH * 2.f, 4.5f);
+    };
 }
 
 
@@ -215,7 +232,7 @@ void render()
 
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
-    gluLookAt(400.f, 500.f, 500.f,
+    gluLookAt(400, 400, 500,
         //200.f, 350.f, 200.f,
         //gIkTarget.x, gIkTarget.y, gIkTarget.z,
         (TARGET_MIN_X + TARGET_MAX_X) * 0.5f, TARGET_Y, (TARGET_MIN_Z + TARGET_MAX_Z) * 0.5f,
@@ -307,33 +324,86 @@ vec3 calcHandPoint(const float* rotations)
 }
 
 
+ostream& operator<<(ostream& os, const TargetPoint& target)
+{
+    for (int i = 0; i < NumBones; ++i)
+    {
+        if (i != 0)
+            os << ", ";
+        os << target.rots[i];
+    }
+    vec3 pos = calcHandPoint(target.rots);
+    float dist = glm::distance(target.initialPos, pos);
+    os << " (" << dist << " away)";
+    return os;
+}
+
+
+// take a good IK result and find the closest approximation that only uses whole-number angles
+void refineToWholeAngles(TargetPoint& target)
+{
+    static const float baseOffset = 1.f;
+    static const int numGuesses = 4;
+
+    vec3 goalPos = target.initialPos;
+
+    float baseRots[NumBones];
+    for (int i = 0; i < NumBones; ++i)
+        baseRots[i] = floorf(target.rots[i]) - baseOffset;
+
+    float bestDistSq = FLT_MAX;
+    float bestRots[NumBones];
+    vec3 bestPos;
+
+    float currRots[NumBones];
+    for (int baseIt = 0; baseIt < numGuesses; ++baseIt)
+    {
+        currRots[BASE_ROT] = baseRots[BASE_ROT] + (float)baseIt;
+
+        for (int shoulderIt = 0; shoulderIt < numGuesses; ++shoulderIt)
+        {
+            currRots[SHOULDER] = baseRots[SHOULDER] + (float)shoulderIt;
+
+            for (int elbowIt = 0; elbowIt < numGuesses; ++elbowIt)
+            {
+                currRots[ELBOW] = baseRots[ELBOW] + (float)elbowIt;
+
+                for (int wristIt = 0; wristIt < numGuesses; ++wristIt)
+                {
+                    currRots[WRIST] = baseRots[WRIST] + (float)wristIt;
+
+                    vec3 testPos = calcHandPoint(currRots);
+                    float testDistSq = distance_sq(testPos, target.initialPos);
+                    if (testDistSq < bestDistSq)
+                    {
+                        bestPos = testPos;
+                        bestDistSq = testDistSq;
+                        copy(currRots, currRots + NumBones, bestRots);
+                    }
+                }
+            }
+        }
+    }
+
+    target.pos = bestPos;
+    copy(bestRots, bestRots + NumBones, target.rots);
+}
+
+
+
+static const float ikTolerance = 1.f;
+
 // IK solver based on https://www.alanzucconi.com/2017/04/10/robotic-arms/
-void tickIK(TargetPoint& target)
+void tickIKInternal(TargetPoint& target)
 {
     float deltaAngle = 0.25f;
     float learningRate = 0.1f;
-    static const float tolerance = 1.f;
 
     vec3 currentPos = calcHandPoint(target.rots);
     float currentDistance = glm::distance(currentPos, target.pos);
-    if (currentDistance <= tolerance)
-    {
-        target.found = true;
-        target.pos = currentPos;
-        cout << "   found @ ";
-        for (int i = 0; i < NumBones; ++i)
-        {
-            if (i != 0)
-                cout << ", ";
-            cout << target.rots[i];
-        }
-        cout << endl;
-
-        return;
-    }
 
     // move more carefully when we get close
-    if (currentDistance < tolerance * 3.f)
+    if (currentDistance < ikTolerance * 3.f)
     {
         learningRate *= 0.25f;
         deltaAngle *= 0.5f;
@@ -361,6 +431,32 @@ void tickIK(TargetPoint& target)
         target.rots[i] -= learningRate * gradients[i];
         //target.rots[i] = roundf(target.rots[i]);
     }
+}
+
+void tickIK(TargetPoint& target)
+{
+    tickIKInternal(target);
+
+    vec3 newPos = calcHandPoint(target.rots);
+    float newDistance = glm::distance(newPos, target.pos);
+    if (newDistance <= ikTolerance)
+    {
+        // we're within our tolerance, so we run the IK a few more times to try and get really close
+        for (int i = 0; i < 10; ++i)
+            tickIKInternal(target);
+
+        vec3 ikPos = calcHandPoint(target.rots);
+        float ikDistance = glm::distance(ikPos, target.pos);
+
+        target.found = true;
+        target.pos = ikPos;
+        cout << "   found @ " << target << endl;
+
+        refineToWholeAngles(target);
+        cout << "   refined to " << target << endl;
+
+        return;
+    }
 
     copy(target.rots, target.rots + NumBones, gRotations);
 }
@@ -368,6 +464,43 @@ void tickIK(TargetPoint& target)
 
 // ---------------------------------------------------------------------------------------------------------------------------
 
+int8_t rotTable[][4] = {
+    {1,2,3,4},
+    {5,6,7,8},
+};
+
+void writeResults()
+{
+    ofstream ofs("roboboogie.h");
+    ofs << "// only two types of dances  x\n\n";
+
+    int minx = (int)TARGET_MIN_X / 10;
+    int maxx = (int)TARGET_MAX_X / 10;
+    int minz = (int)TARGET_MIN_Z / 10;
+    int maxz = (int)TARGET_MAX_Z / 10;
+
+    ofs << "namespace robo {\n";
+    ofs << "static const int MIN_X = " << minx << ";\n";
+    ofs << "static const int MAX_X = " << maxx << ";\n";
+    ofs << "static const int COUNT_X = " << (1 + maxx - minx) << ";\n";
+    ofs << "static const int MIN_Z = " << minz << ";\n";
+    ofs << "static const int MAX_Z = " << maxz << ";\n";
+    ofs << "static const int COUNT_Z = " << (1 + maxz - minz) << ";\n";
+    ofs << "\n\n// target height is " << (int)TARGET_Y << "mm from bottom of bokksu\n\n";
+
+    ofs << "// rotTable is a 2D array of 4 rotations: [BASE_ROT, SHOULDER, ELBOW, WRIST], representing positions in a 2D grid spaced 1cm apart\n";
+    ofs << "// The first element is at (MIN_X,MIN_Z), the second at (MIN_X+1,MIN_Z), and so on\n";
+
+    ofs << "static const char rotTable[COUNT_X * COUNT_Z][4] = {\n";
+    for (const auto& target : gTargets)
+    {
+        ofs << "  { " << target.rots[0] << ", " << target.rots[1] << ", " << target.rots[2] << ", " << target.rots[3] << " }, ";
+        ofs << "  // " << (((int)target.initialPos.x)/10) << "cm , " << (((int)target.initialPos.z)/10) << "cm\n";
+    }
+    ofs << "};\n\n";
+
+    ofs << "} // namespace robo\n";
+}
 
 void update(float deltaTime)
 {
@@ -378,7 +511,7 @@ void update(float deltaTime)
             TargetPoint& target = gTargets.emplace_back();
             target.found = false;
             copy(gRotations, gRotations + NumBones, target.rots);
-            target.pos = vec3(gNextTargetX, TARGET_Y, gNextTargetZ);
+            target.pos = target.initialPos = vec3(gNextTargetX, TARGET_Y, gNextTargetZ);
             cout << "Starting " << target.pos.x << ", " << target.pos.y << ", " << target.pos.z << endl;
 
             gNextTargetX += TARGET_STEP_X;
@@ -392,6 +525,12 @@ void update(float deltaTime)
         }
 
         tickIK(gTargets.back());
+    }
+    else if (!gWrittenResults)
+    {
+        cout << "\n\n\n-------------------------\n" << (4 * gTargets.size()) << "bytes needed for table" << endl;
+        writeResults();
+        gWrittenResults = true;
     }
 
     //gRotations[SHOULDER] = -15.0f + 20.f * (float)sin(gWallTime*2.f);
@@ -479,7 +618,8 @@ bool init()
         return false;
     }
 
-    if (false && SDL_GL_SetSwapInterval(1))
+    bool vsyncLock = false;
+    if (vsyncLock && SDL_GL_SetSwapInterval(1))
     {
         cerr << "Failed to get vsync: " << SDL_GetError() << endl;
     }
