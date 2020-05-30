@@ -1,8 +1,10 @@
 ﻿// based from: https://lazyfoo.net/tutorials/SDL/51_SDL_and_modern_opengl/index.php
 
+#include <array>
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -73,8 +75,13 @@ enum Bones
 
     NumBones,
 };
-float gRotations[NumBones] = { 0.f, -22.f, -65.f, -80.f };
-float gTranslations[NumBones] = { SHOULDER_HEIGHT, ARM_LENGTH, ARM_LENGTH, HAND_LENGTH + PEN_LENGTH };
+using BoneArray = array<float, NumBones>;
+BoneArray gRotations = { 0.f, -22.f, -65.f, -80.f };
+BoneArray gTranslations = { SHOULDER_HEIGHT, ARM_LENGTH, ARM_LENGTH, HAND_LENGTH + PEN_LENGTH };
+
+
+
+vec3 calcHandPoint(span<const float> rotations);
 
 
 
@@ -83,7 +90,7 @@ struct TargetPoint
     vec3 pos;
     vec3 initialPos;
     bool found;
-    float rots[NumBones];
+    BoneArray rots;
 };
 
 
@@ -99,9 +106,6 @@ float gNextTargetX = TARGET_MIN_X;
 float gNextTargetZ = TARGET_MIN_Z;
 bool gFoundAllTargets = false;
 bool gWrittenResults = false;
-
-
-vec3 calcHandPoint(const float* rotations);
 
 
 
@@ -301,19 +305,15 @@ void render()
 
 // ---------------------------------------------------------------------------------------------------------------------------
 
-// TODO: upgrade VS and use span<>...
-vec3 calcHandPoint(const float* rotations)
+vec3 calcHandPoint(span<const float> rotations)
 {
-    if (!rotations)
-        rotations = gRotations;
-
     mat4 transform(1.f);
 
     transform = glm::translate(transform, vec3(0.f, BASE_HEIGHT, 0.f));
 
     vec3 haxis(-1.f, 0.f, 0.f);
     vec3 vaxis(0.f, -1.f, 0.f);
-    for (int i = 0; i < NumBones; ++i)
+    for (size_t i = 0; i < rotations.size(); ++i)
     {
         const vec3& axis = (i != 0) ? haxis : vaxis;
         transform = glm::rotate(transform, rotations[i] * DEGTORAD, axis);
@@ -326,11 +326,11 @@ vec3 calcHandPoint(const float* rotations)
 
 ostream& operator<<(ostream& os, const TargetPoint& target)
 {
-    for (int i = 0; i < NumBones; ++i)
+    for (span<const float> rots(target.rots); const float& rot : rots)
     {
-        if (i != 0)
+        if (rot != rots.front())
             os << ", ";
-        os << target.rots[i];
+        os << rot;
     }
     vec3 pos = calcHandPoint(target.rots);
     float dist = glm::distance(target.initialPos, pos);
@@ -347,15 +347,16 @@ void refineToWholeAngles(TargetPoint& target)
 
     vec3 goalPos = target.initialPos;
 
-    float baseRots[NumBones];
-    for (int i = 0; i < NumBones; ++i)
+   
+    BoneArray baseRots;
+    for (size_t i = 0; i < baseRots.size(); ++i)
         baseRots[i] = floorf(target.rots[i]) - baseOffset;
 
     float bestDistSq = FLT_MAX;
-    float bestRots[NumBones];
+    BoneArray bestRots;
     vec3 bestPos;
 
-    float currRots[NumBones];
+    BoneArray currRots;
     for (int baseIt = 0; baseIt < numGuesses; ++baseIt)
     {
         currRots[BASE_ROT] = baseRots[BASE_ROT] + (float)baseIt;
@@ -378,7 +379,7 @@ void refineToWholeAngles(TargetPoint& target)
                     {
                         bestPos = testPos;
                         bestDistSq = testDistSq;
-                        copy(currRots, currRots + NumBones, bestRots);
+                        copy(currRots.begin(), currRots.end(), bestRots.begin());
                     }
                 }
             }
@@ -386,7 +387,7 @@ void refineToWholeAngles(TargetPoint& target)
     }
 
     target.pos = bestPos;
-    copy(bestRots, bestRots + NumBones, target.rots);
+    copy(bestRots.begin(), bestRots.end(), target.rots.begin());
 }
 
 
@@ -410,8 +411,8 @@ void tickIKInternal(TargetPoint& target)
     }
 
     // calculate all our gradients
-    float gradients[NumBones];
-    for (int i = 0; i < NumBones; ++i)
+    BoneArray gradients;
+    for (size_t i = 0; i < target.rots.size(); ++i)
     {
         float oldAngle = target.rots[i];
         target.rots[i] += deltaAngle;
@@ -426,10 +427,9 @@ void tickIKInternal(TargetPoint& target)
     }
 
     // update all our angles
-    for (int i = 0; i < NumBones; ++i)
+    for (size_t i = 0; i < target.rots.size(); ++i)
     {
         target.rots[i] -= learningRate * gradients[i];
-        //target.rots[i] = roundf(target.rots[i]);
     }
 }
 
@@ -458,16 +458,11 @@ void tickIK(TargetPoint& target)
         return;
     }
 
-    copy(target.rots, target.rots + NumBones, gRotations);
+    copy(target.rots.begin(), target.rots.end(), gRotations.begin());
 }
 
 
 // ---------------------------------------------------------------------------------------------------------------------------
-
-int8_t rotTable[][4] = {
-    {1,2,3,4},
-    {5,6,7,8},
-};
 
 void writeResults()
 {
@@ -489,12 +484,12 @@ void writeResults()
     ofs << "\n\n// target height is " << (int)TARGET_Y << "mm from bottom of bokksu\n\n";
 
     ofs << "// rotTable is a 2D array of 4 rotations: [BASE_ROT, SHOULDER, ELBOW, WRIST], representing positions in a 2D grid spaced 1cm apart\n";
-    ofs << "// The first element is at (MIN_X,MIN_Z), the second at (MIN_X+1,MIN_Z), and so on\n";
+    ofs << "// The first element is at (MIN_X,MIN_Z), the fourth at (MIN_X+1,MIN_Z), and so on\n";
 
-    ofs << "static const char rotTable[COUNT_X * COUNT_Z][4] = {\n";
+    ofs << "static const char rotTable[COUNT_X * COUNT_Z * 4] PROGMEM = {\n";
     for (const auto& target : gTargets)
     {
-        ofs << "  { " << target.rots[0] << ", " << target.rots[1] << ", " << target.rots[2] << ", " << target.rots[3] << " }, ";
+        ofs << "  " << target.rots[0] << ", " << target.rots[1] << ", " << target.rots[2] << ", " << target.rots[3] << ", ";
         ofs << "  // " << (((int)target.initialPos.x)/10) << "cm , " << (((int)target.initialPos.z)/10) << "cm\n";
     }
     ofs << "};\n\n";
@@ -510,7 +505,7 @@ void update(float deltaTime)
         {
             TargetPoint& target = gTargets.emplace_back();
             target.found = false;
-            copy(gRotations, gRotations + NumBones, target.rots);
+            copy(gRotations.begin(), gRotations.end(), target.rots.begin());
             target.pos = target.initialPos = vec3(gNextTargetX, TARGET_Y, gNextTargetZ);
             cout << "Starting " << target.pos.x << ", " << target.pos.y << ", " << target.pos.z << endl;
 
@@ -532,9 +527,6 @@ void update(float deltaTime)
         writeResults();
         gWrittenResults = true;
     }
-
-    //gRotations[SHOULDER] = -15.0f + 20.f * (float)sin(gWallTime*2.f);
-    //gRotations[ELBOW] = -55.0f + 15.f * (float)cos(gWallTime);
 }
 
 
