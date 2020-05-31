@@ -339,15 +339,41 @@ ostream& operator<<(ostream& os, const TargetPoint& target)
 }
 
 
+
+static const int numRefinementGuesses = 4;
+
+template<int BoneId>
+void refineBoneToWholeAngles(BoneArray& currRots, BoneArray& baseRots, const TargetPoint& target, BoneArray& bestRots, vec3& bestPos, float& bestDistSq)
+{
+    for (int guess = 0; guess < numRefinementGuesses; ++guess)
+    {
+        currRots[BoneId] = baseRots[BoneId] + (float)guess;
+
+        refineBoneToWholeAngles<BoneId + 1>(currRots, baseRots, target, bestRots, bestPos, bestDistSq);
+    }
+}
+
+template<>
+void refineBoneToWholeAngles<NumBones>(BoneArray& currRots, BoneArray& baseRots, const TargetPoint& target, BoneArray& bestRots, vec3& bestPos, float& bestDistSq)
+{
+    vec3 testPos = calcHandPoint(currRots);
+    float testDistSq = distance_sq(testPos, target.initialPos);
+    if (testDistSq < bestDistSq)
+    {
+        bestPos = testPos;
+        bestDistSq = testDistSq;
+        copy(currRots.begin(), currRots.end(), bestRots.begin());
+    }
+}
+
+
 // take a good IK result and find the closest approximation that only uses whole-number angles
 void refineToWholeAngles(TargetPoint& target)
 {
     static const float baseOffset = 1.f;
-    static const int numGuesses = 4;
 
     vec3 goalPos = target.initialPos;
 
-   
     BoneArray baseRots;
     for (size_t i = 0; i < baseRots.size(); ++i)
         baseRots[i] = floorf(target.rots[i]) - baseOffset;
@@ -357,34 +383,7 @@ void refineToWholeAngles(TargetPoint& target)
     vec3 bestPos;
 
     BoneArray currRots;
-    for (int baseIt = 0; baseIt < numGuesses; ++baseIt)
-    {
-        currRots[BASE_ROT] = baseRots[BASE_ROT] + (float)baseIt;
-
-        for (int shoulderIt = 0; shoulderIt < numGuesses; ++shoulderIt)
-        {
-            currRots[SHOULDER] = baseRots[SHOULDER] + (float)shoulderIt;
-
-            for (int elbowIt = 0; elbowIt < numGuesses; ++elbowIt)
-            {
-                currRots[ELBOW] = baseRots[ELBOW] + (float)elbowIt;
-
-                for (int wristIt = 0; wristIt < numGuesses; ++wristIt)
-                {
-                    currRots[WRIST] = baseRots[WRIST] + (float)wristIt;
-
-                    vec3 testPos = calcHandPoint(currRots);
-                    float testDistSq = distance_sq(testPos, target.initialPos);
-                    if (testDistSq < bestDistSq)
-                    {
-                        bestPos = testPos;
-                        bestDistSq = testDistSq;
-                        copy(currRots.begin(), currRots.end(), bestRots.begin());
-                    }
-                }
-            }
-        }
-    }
+    refineBoneToWholeAngles<BASE_ROT>(currRots, baseRots, target, bestRots, bestPos, bestDistSq);
 
     target.pos = bestPos;
     copy(bestRots.begin(), bestRots.end(), target.rots.begin());
